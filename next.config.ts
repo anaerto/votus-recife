@@ -1,11 +1,13 @@
 import type { NextConfig } from "next";
 
+const allowIgnores = process.env.ALLOW_BUILD_IGNORES === "true";
+
 const nextConfig: NextConfig = {
   eslint: {
-    ignoreDuringBuilds: true,
+    ignoreDuringBuilds: allowIgnores,
   },
   typescript: {
-    ignoreBuildErrors: true,
+    ignoreBuildErrors: allowIgnores,
   },
 };
 

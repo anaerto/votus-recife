@@ -11,8 +11,8 @@ export async function GET() {
     const buf = fs.readFileSync(filePath);
     return new Response(buf, {
       headers: {
-        'Content-Type': 'text/csv; charset=binary',
-        'Cache-Control': 'public, max-age=0',
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Cache-Control': 'no-store',
       },
     });
   } catch (e: any) {
