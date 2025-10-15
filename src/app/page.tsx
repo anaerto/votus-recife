@@ -1,19 +1,46 @@
 import SearchInput from "@/components/SearchInput";
 import { getSearchOptions } from "@/lib/data";
 
-export default function Home() {
-  const optionsAll = getSearchOptions();
+export default async function Home() {
+  let optionsAll: Awaited<ReturnType<typeof getSearchOptions>> = [];
+  try {
+    optionsAll = await getSearchOptions();
+  } catch {
+    optionsAll = [];
+  }
+  
   return (
-    <main className="min-h-svh">
-      <section className="py-12">
-        <div className="container mx-auto px-4">
-          <h1 className="text-3xl font-semibold">VOTUS Recife — Consulta por Candidato</h1>
-          <p className="mt-2 text-gray-600">Digite o Nome de Urna ou o Número do candidato para iniciar.</p>
-          <div className="mt-6">
-            <SearchInput optionsAll={optionsAll} />
+    <div className="min-h-screen" suppressHydrationWarning>
+      {/* Header */}
+      
+
+      <main>
+        {/* Hero Section */}
+        <section className="py-18 px-16">
+          <div className="container mx-auto max-w-10xl" suppressHydrationWarning>
+            <div className="text-left mb-16" suppressHydrationWarning>
+              <p className="text-xl md:text-xl " style={{ color: '#00a0c1' }}>
+                Eleições Municipais 
+              </p>
+              <h2 className="text-2xl font-bold leading-tight" style={{ color: '#00a0c1' }}>
+                Vereador Recife | 2024
+              </h2>
+
+            </div>
+
+            {/* Search Section */}
+            <div className="max-w-2xl mx-auto mb-16" suppressHydrationWarning>
+              <SearchInput optionsAll={optionsAll} />
+            </div>
+
+            {/* Statistics Cards */}
+            
+
+            {/* Info Cards */}
+            
           </div>
-        </div>
-      </section>
-    </main>
+        </section>
+      </main>
+    </div>
   );
 }

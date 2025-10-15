@@ -1,11 +1,9 @@
+import { sql } from './db';
 import fs from 'fs';
 import path from 'path';
-// @ts-ignore
 import Papa from 'papaparse';
-import iconv from 'iconv-lite';
-import type { Candidato, Voto, DataCache, CandidateData } from './types';
+import type { Candidato, CandidateData } from './types';
 
-// Normaliza nomes para join robusto
 function norm(str: string): string {
   return str
     .normalize('NFD')
@@ -14,298 +12,299 @@ function norm(str: string): string {
     .toUpperCase();
 }
 
-let globalCache: DataCache | null = null as any;
-let currentVersion: string | null = null;
-
-function readCsv(filePath: string, encoding: 'utf8' | 'cp1252' = 'utf8'): string {
-  if (encoding === 'cp1252') {
-    const buf = fs.readFileSync(filePath);
-    return iconv.decode(buf, 'win1252');
-  }
-  return fs.readFileSync(filePath, 'utf8');
-}
-
-// Heurística para detectar mojibake
-function scoreMojibake(s: string): number {
-  if (!s) return 0;
-  const patterns = ['Ã', 'Â', 'ï¿½', '�'];
-  let score = 0;
-  for (const p of patterns) {
-    const matches = s.split(p).length - 1;
-    score += matches;
-  }
-  return score;
-}
-
-// Decodificação inteligente: compara utf8 vs cp1252 e escolhe o com menos mojibake
-function readCsvSmart(filePath: string): string {
-  const buf = fs.readFileSync(filePath);
-  const utf8 = buf.toString('utf8');
-  const cp1252 = iconv.decode(buf, 'win1252');
-  const cp1252Fixed = scoreMojibake(cp1252) > 0 ? iconv.decode(iconv.encode(cp1252, 'latin1'), 'utf8') : cp1252;
-  const utfScore = scoreMojibake(utf8);
-  const cpScore = scoreMojibake(cp1252Fixed);
-  return utfScore <= cpScore ? utf8 : cp1252Fixed;
-}
-
-function parseCandidatos(csv: string): Candidato[] {
-  const { data } = Papa.parse(csv, {
-    header: true,
-    delimiter: ';',
-    skipEmptyLines: true,
-  });
-  const fix = (s: string) => fixText(s);
-  return (data as any[])
-    .filter(Boolean)
-    .map((row) => ({
-      nrVotavel: String(row['NR_VOTAVEL'] ?? '').trim(),
-      nmVotavel: fix(String(row['NM_VOTAVEL'] ?? '').trim()),
-      nmUrna: fix(String(row['NM_URNA'] ?? '').trim()),
-      partido: fix(String(row['SG_PARTIDO'] ?? '').trim()),
-      resultado: fix(String(row['RESULTADO'] ?? '').trim()),
-      totalVotos: Number(String(row['TOTAL_VOTOS'] ?? '0').replace(/\D/g, '')) || 0,
-    }));
-}
-
-function parseVotos(csv: string): Voto[] {
-  const { data } = Papa.parse(csv, {
-    header: true,
-    delimiter: ';',
-    skipEmptyLines: true,
-  });
-  const fix = (s: string) => fixText(s);
-  return (data as any[])
-    .filter(Boolean)
-    .map((row) => ({
-      nmVotavel: fix(String(row['NM_VOTAVEL'] ?? '').trim()),
-      // prioriza número puro da zona eleitoral para chaves consistentes
-      // CSV usa cabeçalho "Zona" (e não "ZONA"); contemplamos variações
-      zona:
-        (String((row['Zona'] ?? row['ZONA'] ?? row['NR_ZONA'] ?? '') as string)
-          .replace(/\D/g, '')
-          .trim()) ||
-        fix(String((row['Zona'] ?? row['ZONA'] ?? row['NR_ZONA'] ?? '') as string).trim()),
-      bairro: fix(String(row['BAIRRO'] ?? '').trim()),
-      // CSV usa "LOCAL_VOTACAO" e há casos com espaço no fim do cabeçalho
-      local: fix(
-        String((row['LOCAL_VOTACAO '] ?? row['LOCAL_VOTACAO'] ?? row['LOCAL'] ?? row['NM_LOCAL'] ?? '') as string).trim()
-      ),
-      secao: String((row['SECAO'] ?? row['NR_SECAO'] ?? '') as string).trim(),
-      votos: Number(String(row['VOTOS'] ?? '0').replace(/\D/g, '')) || 0,
-    }));
-}
-
-export function getData(): DataCache {
-  // Invalida cache se a versão dos arquivos mudou
-  const version = getDataVersion();
-  if (currentVersion !== version) {
-    globalCache = null as any;
-    currentVersion = version;
-  }
-  if (globalCache) return globalCache;
-  const base = process.cwd();
-  const candidatosPath = path.join(base, 'data', 'dados_candidatos.csv');
-  const votosPath = path.join(base, 'data', 'dados_votacao.csv');
-
-  // Decodificação inteligente para ambos CSVs (utf-8 ou cp1252)
-  const candidatosCsv = readCsvSmart(candidatosPath);
-  const votosCsv = readCsvSmart(votosPath);
-
-  const candidatos = parseCandidatos(candidatosCsv);
-  const votos = parseVotos(votosCsv);
-
-  // Índices para consultas rápidas
-  const candidatosPorNome = new Map<string, Candidato>();
-  const candidatosPorNumero = new Map<string, Candidato>();
-  const autocompleteIndex = new Map<string, { label: string; value: string }[]>();
-  const tokenize = (s: string) => s.split(/[^A-Z0-9]+/g).filter(Boolean);
-  for (const c of candidatos) {
-    const nV = norm(c.nmVotavel);
-    const nU = norm(c.nmUrna);
-    candidatosPorNome.set(nV, c);
-    candidatosPorNome.set(nU, c);
-    candidatosPorNumero.set(String(c.nrVotavel), c);
-
-    const label = `${c.nmUrna} (${c.nrVotavel})`;
-    const value = c.nrVotavel;
-    const seen = new Set<string>();
-    // Prefixos do nome completo
-    for (const base of [nU, nV]) {
-      for (let L = 1; L <= Math.min(5, base.length); L++) {
-        const p = base.slice(0, L);
-        if (seen.has(p)) continue;
-        seen.add(p);
-        const arr = autocompleteIndex.get(p) || [];
-        if (!arr.some((x) => x.value === value)) arr.push({ label, value });
-        autocompleteIndex.set(p, arr);
-      }
-      // Prefixos por token
-      for (const tok of tokenize(base)) {
-        for (let L = 1; L <= Math.min(5, tok.length); L++) {
-          const p = tok.slice(0, L);
-          if (seen.has(p)) continue;
-          seen.add(p);
-          const arr = autocompleteIndex.get(p) || [];
-          if (!arr.some((x) => x.value === value)) arr.push({ label, value });
-          autocompleteIndex.set(p, arr);
-        }
-      }
-    }
-    // Prefixos por número
-    const num = String(c.nrVotavel);
-    for (let L = 1; L <= Math.min(5, num.length); L++) {
-      const p = num.slice(0, L);
-      const arr = autocompleteIndex.get(p) || [];
-      if (!arr.some((x) => x.value === value)) arr.push({ label, value });
-      autocompleteIndex.set(p, arr);
-    }
-  }
-
-  globalCache = { candidatos, votos, candidatosPorNome, candidatosPorNumero, autocompleteIndex };
-  return globalCache;
-}
-
-// Versão dos dados baseada em timestamps dos arquivos CSV
 export function getDataVersion(): string {
-  try {
-    const base = process.cwd();
-    const candidatosPath = path.join(base, 'data', 'dados_candidatos.csv');
-    const votosPath = path.join(base, 'data', 'dados_votacao.csv');
-    const s1 = fs.statSync(candidatosPath);
-    const s2 = fs.statSync(votosPath);
-    return `cand:${s1.mtimeMs}|votos:${s2.mtimeMs}`;
-  } catch {
-    return 'unknown';
-  }
+  return 'db-v1';
 }
 
-// Opções pré-processadas para busca local no cliente (sem fetch por query)
-export function getSearchOptions(): Array<{ label: string; value: string; searchTokens: string[] }> {
-  const { candidatos } = getData();
+export async function getSearchOptions(): Promise<Array<{ label: string; value: string; searchTokens: string[] }>> {
   const toNormTokens = (s: string) =>
-    s
+    String(s || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .trim()
       .toLowerCase()
       .split(/[^a-z0-9]+/g)
       .filter(Boolean);
-  return candidatos.map((c) => {
-    const label = `${c.nmUrna} (${c.nrVotavel})`;
-    const tokens = new Set<string>();
-    for (const t of toNormTokens(c.nmUrna)) tokens.add(t);
-    for (const t of toNormTokens(c.nmVotavel)) tokens.add(t);
-    // Inclui número como token para busca por prefixo de número
-    tokens.add(String(c.nrVotavel).toLowerCase());
-    return { label, value: String(c.nrVotavel), searchTokens: Array.from(tokens) };
-  });
-}
 
-export function getAutocomplete(query: string): Array<{ label: string; value: string }> {
-  const { candidatos, autocompleteIndex } = getData();
-  const q = norm(query);
-  if (!q || q.length < 1) return [];
-  const key = q.slice(0, Math.min(5, q.length));
-  const base = (autocompleteIndex?.get(key) || []).slice(0, 30); // base reduzida
-  if (base.length > 0) {
-    // filtro final preciso sobre a base
-    const qRaw = query;
-    return base
-      .filter((opt) => {
-        const tokens = opt.label
-          .toUpperCase()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .split(/[^A-Z0-9]+/g)
-          .filter(Boolean);
-        return tokens.some((t) => t.startsWith(q)) || opt.value.startsWith(qRaw);
-      })
-      .slice(0, 10);
-  }
-  // fallback para lista completa (raramente acionado)
-  const out: Array<{ label: string; value: string }> = [];
-  for (const c of candidatos) {
-    const label = `${c.nmUrna} (${c.nrVotavel})`;
-    const tokens = label
-      .toUpperCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .split(/[^A-Z0-9]+/g)
-      .filter(Boolean);
-    if (tokens.some((t) => t.startsWith(q)) || String(c.nrVotavel).startsWith(query)) {
-      out.push({ label, value: c.nrVotavel });
+  // 1) Tenta via banco
+  try {
+    const { rows } = await sql`SELECT nr_votavel, nm_urna, nm_votavel FROM candidatos`;
+    if (rows && rows.length > 0) {
+      return rows.map((c: any) => {
+        const label = `${c.nm_urna} (${c.nr_votavel})`;
+        const tokens = new Set<string>();
+        for (const t of toNormTokens(c.nm_urna)) tokens.add(t);
+        for (const t of toNormTokens(c.nm_votavel)) tokens.add(t);
+        tokens.add(String(c.nr_votavel).toLowerCase());
+        return { label, value: String(c.nr_votavel), searchTokens: Array.from(tokens) };
+      });
     }
-    if (out.length >= 10) break;
+  } catch {
+    // segue para fallback
   }
-  return out;
+
+  // 2) Fallback: ler CSV local (dados_candidatos.csv)
+  try {
+    const base = process.cwd();
+    const filePath = path.join(base, 'data', 'dados_candidatos.csv');
+    const csv = fs.readFileSync(filePath, 'utf8');
+    const parsed = Papa.parse(csv, { header: true, skipEmptyLines: true });
+    const records = Array.isArray(parsed.data) ? (parsed.data as any[]) : [];
+    return records
+      .filter((r) => r && (r.NR_VOTAVEL || r.nr_votavel) && (r.NM_URNA || r.nm_urna))
+      .map((r) => {
+        const nr = String(r.NR_VOTAVEL ?? r.nr_votavel);
+        const nmUrna = String(r.NM_URNA ?? r.nm_urna ?? '');
+        const nmVotavel = String(r.NM_VOTAVEL ?? r.nm_votavel ?? '');
+        const label = `${nmUrna} (${nr})`;
+        const tokens = new Set<string>();
+        for (const t of toNormTokens(nmUrna)) tokens.add(t);
+        for (const t of toNormTokens(nmVotavel)) tokens.add(t);
+        tokens.add(nr.toLowerCase());
+        return { label, value: nr, searchTokens: Array.from(tokens) };
+      });
+  } catch {
+    // Sem banco e sem CSV
+  }
+
+  return [];
 }
 
-export function resolveCandidate(query: string): Candidato | null {
-  const { candidatosPorNumero, candidatosPorNome } = getData();
-  const byNumber = candidatosPorNumero.get(String(query));
-  if (byNumber) return byNumber;
-  const byName = candidatosPorNome.get(norm(query));
-  return byName ?? null;
+export async function resolveCandidate(query: string): Promise<Candidato | null> {
+  const isNum = /^\d+$/.test(String(query));
+  if (isNum) {
+    const { rows } = await sql`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nr_votavel = ${String(query)} LIMIT 1`;
+    if (rows.length) {
+      const r = rows[0] as any;
+      return {
+        nrVotavel: String(r.nr_votavel),
+        nmVotavel: String(r.nm_votavel),
+        nmUrna: String(r.nm_urna),
+        partido: String(r.sg_partido),
+        resultado: String(r.resultado),
+        totalVotos: Number(r.total_votos) || 0,
+      };
+    }
+  }
+  const q = String(query);
+  const { rows } = await sql`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE UPPER(nm_votavel) = ${q.toUpperCase()} OR UPPER(nm_urna) = ${q.toUpperCase()} LIMIT 1`;
+  if (!rows.length) return null;
+  const r = rows[0] as any;
+  return {
+    nrVotavel: String(r.nr_votavel),
+    nmVotavel: String(r.nm_votavel),
+    nmUrna: String(r.nm_urna),
+    partido: String(r.sg_partido),
+    resultado: String(r.resultado),
+    totalVotos: Number(r.total_votos) || 0,
+  };
 }
 
-export function getCandidateData(nrOrName: string): CandidateData | null {
-  const data = getData();
-  const cand = resolveCandidate(nrOrName);
+// Resolve com fallback ao CSV quando o banco não retornar
+export async function resolveCandidateWithFallback(query: string): Promise<Candidato | null> {
+  try {
+    const byDb = await resolveCandidate(query);
+    if (byDb) return byDb;
+  } catch {
+    // ignora e segue para CSV
+  }
+  try {
+    const base = process.cwd();
+    const filePath = path.join(base, 'data', 'dados_candidatos.csv');
+    const csv = fs.readFileSync(filePath, 'utf8');
+    const parsed = Papa.parse(csv, { header: true, delimiter: ';', skipEmptyLines: true });
+    const rows = Array.isArray(parsed.data) ? (parsed.data as any[]) : [];
+    const q = String(query);
+    const isNum = /^\d+$/.test(q);
+    const qNorm = norm(q);
+    const match = rows.find((row) => {
+      const nr = String(row['NR_VOTAVEL'] || row['nr_votavel'] || '').trim();
+      const nmV = String(row['NM_VOTAVEL'] || row['nm_votavel'] || '').trim();
+      const nmU = String(row['NM_URNA'] || row['nm_urna'] || '').trim();
+      if (isNum) return nr === q;
+      return norm(nmV) === qNorm || norm(nmU) === qNorm;
+    });
+    if (!match) return null;
+    return {
+      nrVotavel: String(match['NR_VOTAVEL'] ?? match['nr_votavel'] ?? ''),
+      nmVotavel: String(match['NM_VOTAVEL'] ?? match['nm_votavel'] ?? ''),
+      nmUrna: String(match['NM_URNA'] ?? match['nm_urna'] ?? ''),
+      partido: String(match['SG_PARTIDO'] ?? match['sg_partido'] ?? ''),
+      resultado: String(match['RESULTADO'] ?? match['resultado'] ?? ''),
+      totalVotos: Number(String(match['TOTAL_VOTOS'] ?? match['total_votos'] ?? '0').replace(/\D/g, '')) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function getCandidateData(nrOrName: string): Promise<CandidateData | null> {
+  const cand = await resolveCandidateWithFallback(nrOrName);
   if (!cand) return null;
 
-  // Ranking geral com base em TOTAL_VOTOS
-  const ordenados = [...data.candidatos].sort((a, b) => b.totalVotos - a.totalVotos);
-  const rankingGeralPosicao = ordenados.findIndex((c) => c.nrVotavel === cand.nrVotavel) + 1;
-  const rankingGeralTotal = ordenados.length;
+  const total = Number(cand.totalVotos) || 0;
+  let rankingGeralTotal = 0;
+  let rankingGeralPosicao = 0;
+  try {
+    const rankRow = await sql`SELECT COUNT(*) AS total, SUM(CASE WHEN total_votos > ${total} THEN 1 ELSE 0 END) + 1 AS pos FROM candidatos`;
+    rankingGeralTotal = Number((rankRow.rows[0] as any).total) || 0;
+    rankingGeralPosicao = Number((rankRow.rows[0] as any).pos) || 0;
+  } catch {
+    // Fallback CSV: ranking por NM_VOTAVEL
+    try {
+      const csvPath = path.join(process.cwd(), 'data', 'dados_votacao.csv');
+      const csv = fs.readFileSync(csvPath, 'utf8');
+      const parsed = Papa.parse(csv, { header: true, delimiter: ';', skipEmptyLines: true });
+      const rows = Array.isArray(parsed.data) ? (parsed.data as any[]) : [];
+      const totalsByName = new Map<string, number>();
+      for (const row of rows) {
+        const nm = String(row['NM_VOTAVEL'] || '').trim();
+        const votos = Number(String(row['VOTOS'] || '0').replace(/\D/g, '')) || 0;
+        const key = norm(nm);
+        totalsByName.set(key, (totalsByName.get(key) || 0) + votos);
+      }
+      const candKey1 = norm(cand.nmVotavel);
+      const candKey2 = norm(cand.nmUrna);
+      const candTotal = Math.max(totalsByName.get(candKey1) || 0, totalsByName.get(candKey2) || 0, total);
+      const sorted = Array.from(totalsByName.values()).sort((a, b) => b - a);
+      rankingGeralTotal = totalsByName.size;
+      rankingGeralPosicao = Math.max(1, sorted.findIndex((v) => v === candTotal) + 1);
+    } catch {}
+  }
 
-  // Agregações
-  const nameVote = norm(cand.nmVotavel);
-  const nameUrn = norm(cand.nmUrna);
-  const votosCand = data.votos.filter((v) => {
-    const vn = norm(v.nmVotavel);
-    return vn === nameVote || vn === nameUrn;
-  });
-  const somaPor = (key: keyof Voto) => {
-    const map = new Map<string, number>();
-    for (const v of votosCand) {
-      const k = String(v[key]);
-      map.set(k, (map.get(k) || 0) + v.votos);
-    }
-    return map;
-  };
+  const nameVote = cand.nmVotavel;
+  const nameUrn = cand.nmUrna;
 
-  const porZona = somaPor('zona');
-  const porBairro = somaPor('bairro');
-  const porLocal = somaPor('local');
-  const porSecao = somaPor('secao');
+  const porZona = new Map<string, number>();
+  const porBairro = new Map<string, number>();
+  const porLocal = new Map<string, number>();
+  const porSecao = new Map<string, number>();
+  try {
+    const zonaRows = await sql`SELECT zona AS zona, SUM(votos)::int AS votos FROM votos WHERE nm_normalizado IN (${norm(nameVote)}, ${norm(nameUrn)}) GROUP BY zona ORDER BY zona`;
+    const bairroRows = await sql`SELECT bairro AS bairro, SUM(votos)::int AS votos FROM votos WHERE nm_normalizado IN (${norm(nameVote)}, ${norm(nameUrn)}) GROUP BY bairro ORDER BY votos DESC`;
+    const localRows = await sql`SELECT local AS local, SUM(votos)::int AS votos FROM votos WHERE nm_normalizado IN (${norm(nameVote)}, ${norm(nameUrn)}) GROUP BY local ORDER BY votos DESC`;
+    const secaoRows = await sql`SELECT secao AS secao, SUM(votos)::int AS votos FROM votos WHERE nm_normalizado IN (${norm(nameVote)}, ${norm(nameUrn)}) GROUP BY secao ORDER BY votos DESC`;
+    for (const r of (zonaRows.rows || []) as any[]) porZona.set(String(r.zona), Number(r.votos) || 0);
+    for (const r of (bairroRows.rows || []) as any[]) porBairro.set(String(r.bairro), Number(r.votos) || 0);
+    for (const r of (localRows.rows || []) as any[]) porLocal.set(String(r.local), Number(r.votos) || 0);
+    for (const r of (secaoRows.rows || []) as any[]) porSecao.set(String(r.secao), Number(r.votos) || 0);
+  } catch {
+    // Fallback CSV: agregações
+    try {
+      const csvPath = path.join(process.cwd(), 'data', 'dados_votacao.csv');
+      const csv = fs.readFileSync(csvPath, 'utf8');
+      const parsed = Papa.parse(csv, { header: true, delimiter: ';', skipEmptyLines: true });
+      const rows = Array.isArray(parsed.data) ? (parsed.data as any[]) : [];
+      const k1 = norm(nameVote);
+      const k2 = norm(nameUrn);
+      const totalsByScope = {
+        zona: new Map<string, number>(),
+        bairro: new Map<string, number>(),
+        local: new Map<string, number>(),
+        secao: new Map<string, number>(),
+      } as const;
+      // agregações do candidato e ranking geral
+      const totalsByName = new Map<string, number>();
+      for (const row of rows) {
+        const nm = String(row['NM_VOTAVEL'] || '').trim();
+        const nmNorm = norm(nm);
+        const votos = Number(String(row['VOTOS'] || '0').replace(/\D/g, '')) || 0;
+        totalsByName.set(nmNorm, (totalsByName.get(nmNorm) || 0) + votos);
+        if (nmNorm === k1 || nmNorm === k2) {
+          const zona = String(row['Zona'] ?? row['ZONA'] ?? row['NR_ZONA'] ?? '').trim();
+          const bairro = String(row['BAIRRO'] ?? '').trim();
+          const local = String(row['LOCAL_VOTACAO '] ?? row['LOCAL_VOTACAO'] ?? row['LOCAL'] ?? row['NM_LOCAL'] ?? '').trim();
+          const secao = String(row['SECAO'] ?? row['NR_SECAO'] ?? '').trim();
+          if (zona) totalsByScope.zona.set(zona, (totalsByScope.zona.get(zona) || 0) + votos);
+          if (bairro) totalsByScope.bairro.set(bairro, (totalsByScope.bairro.get(bairro) || 0) + votos);
+          if (local) totalsByScope.local.set(local, (totalsByScope.local.get(local) || 0) + votos);
+          if (secao) totalsByScope.secao.set(secao, (totalsByScope.secao.get(secao) || 0) + votos);
+        }
+      }
+      // preenche maps finais
+      for (const [k, v] of totalsByScope.zona) porZona.set(k, v);
+      for (const [k, v] of totalsByScope.bairro) porBairro.set(k, v);
+      for (const [k, v] of totalsByScope.local) porLocal.set(k, v);
+      for (const [k, v] of totalsByScope.secao) porSecao.set(k, v);
+      // ranking geral via CSV se ainda não definido
+      if (!rankingGeralTotal || !rankingGeralPosicao) {
+        rankingGeralTotal = totalsByName.size;
+        const candTotal = Math.max(totalsByName.get(k1) || 0, totalsByName.get(k2) || 0, total);
+        const sorted = Array.from(totalsByName.values()).sort((a, b) => b - a);
+        rankingGeralPosicao = Math.max(1, sorted.findIndex((v) => v === candTotal) + 1);
+      }
+    } catch {}
+  }
 
   const donutPorZona = Array.from(porZona.entries()).map(([name, value]) => ({ name, value }));
 
-  function recorde(
+  async function recorde(
     map: Map<string, number>,
-    escopo: keyof Voto
-  ): { nome: string; votos: number; posicao: number; total: number } | null {
+    escopo: 'zona' | 'secao' | 'bairro' | 'local'
+  ): Promise<{ nome: string; votos: number; posicao: number; total: number } | null> {
     if (map.size === 0) return null;
-    // Maior valor para o candidato
     const [nome, votos] = Array.from(map.entries()).sort((a, b) => b[1] - a[1])[0];
-    // Ranking do candidato nesse escopo comparado com todos candidatos
-    const agregadosPorCandidato = new Map<string, number>(); // chave: NR_VOTAVEL ou nome normalizado
-    for (const v of data.votos.filter((x) => String((x as any)[escopo]) === nome)) {
-      const cMatch = data.candidatosPorNome.get(norm(v.nmVotavel));
-      const key = cMatch ? String(cMatch.nrVotavel) : norm(v.nmVotavel);
-      agregadosPorCandidato.set(key, (agregadosPorCandidato.get(key) || 0) + v.votos);
+    try {
+      let scopeQuery: any;
+      if (escopo === 'zona') {
+        scopeQuery = await sql`SELECT nm_normalizado AS nm, SUM(votos)::int AS v FROM votos WHERE zona = ${nome} GROUP BY nm_normalizado`;
+      } else if (escopo === 'secao') {
+        scopeQuery = await sql`SELECT nm_normalizado AS nm, SUM(votos)::int AS v FROM votos WHERE secao = ${nome} GROUP BY nm_normalizado`;
+      } else if (escopo === 'bairro') {
+        scopeQuery = await sql`SELECT nm_normalizado AS nm, SUM(votos)::int AS v FROM votos WHERE bairro = ${nome} GROUP BY nm_normalizado`;
+      } else {
+        scopeQuery = await sql`SELECT nm_normalizado AS nm, SUM(votos)::int AS v FROM votos WHERE local = ${nome} GROUP BY nm_normalizado`;
+      }
+      const ranking = (scopeQuery.rows as any[]).sort((a, b) => Number(b.v) - Number(a.v));
+      const targetNorm1 = norm(nameVote);
+      const targetNorm2 = norm(nameUrn);
+      const posicao = Math.max(
+        1,
+        ranking.findIndex((r) => String(r.nm) === targetNorm1 || String(r.nm) === targetNorm2) + 1
+      );
+      const total = ranking.length;
+      return { nome, votos, posicao, total };
+    } catch {
+      // Fallback CSV: ranking por escopo
+      try {
+        const csvPath = path.join(process.cwd(), 'data', 'dados_votacao.csv');
+        const csv = fs.readFileSync(csvPath, 'utf8');
+        const parsed = Papa.parse(csv, { header: true, delimiter: ';', skipEmptyLines: true });
+        const rows = Array.isArray(parsed.data) ? (parsed.data as any[]) : [];
+        const targetNorm1 = norm(nameVote);
+        const targetNorm2 = norm(nameUrn);
+        const totalsByName = new Map<string, number>();
+        for (const row of rows) {
+          const nm = String(row['NM_VOTAVEL'] || '').trim();
+          const nmNorm = norm(nm);
+          const votosRow = Number(String(row['VOTOS'] || '0').replace(/\D/g, '')) || 0;
+          const zona = String(row['Zona'] ?? row['ZONA'] ?? row['NR_ZONA'] ?? '').trim();
+          const bairro = String(row['BAIRRO'] ?? '').trim();
+          const local = String(row['LOCAL_VOTACAO '] ?? row['LOCAL_VOTACAO'] ?? row['LOCAL'] ?? row['NM_LOCAL'] ?? '').trim();
+          const secao = String(row['SECAO'] ?? row['NR_SECAO'] ?? '').trim();
+          const scopeVal = escopo === 'zona' ? zona : escopo === 'bairro' ? bairro : escopo === 'local' ? local : secao;
+          if (String(scopeVal) === String(nome)) {
+            totalsByName.set(nmNorm, (totalsByName.get(nmNorm) || 0) + votosRow);
+          }
+        }
+        const ranking = Array.from(totalsByName.entries()).sort((a, b) => b[1] - a[1]);
+        const posicao = Math.max(
+          1,
+          ranking.findIndex(([nm]) => nm === targetNorm1 || nm === targetNorm2) + 1
+        );
+        const totalRank = ranking.length;
+        return { nome, votos, posicao, total: totalRank };
+      } catch {
+        return { nome, votos, posicao: 1, total: 1 };
+      }
     }
-    const ranking = Array.from(agregadosPorCandidato.entries()).sort((a, b) => b[1] - a[1]);
-    const posicao = ranking.findIndex((r) => r[0] === String(cand!.nrVotavel)) + 1;
-    const total = ranking.length;
-    return { nome, votos, posicao, total };
   }
 
   const recordes = {
-    zona: recorde(porZona, 'zona'),
-    secao: recorde(porSecao, 'secao'),
-    bairro: recorde(porBairro, 'bairro'),
-    local: recorde(porLocal, 'local'),
+    zona: await recorde(porZona, 'zona'),
+    secao: await recorde(porSecao, 'secao'),
+    bairro: await recorde(porBairro, 'bairro'),
+    local: await recorde(porLocal, 'local'),
   };
 
   const mapas = {
@@ -321,102 +320,4 @@ export function getCandidateData(nrOrName: string): CandidateData | null {
     recordes,
     mapas,
   };
-}
-
-// Correção de mojibake e resíduos de dupla codificação
-function fixText(input: string): string {
-  if (!input) return input;
-  let s = input;
-  // Remover C2/Â fantasmas comuns
-  s = s.replace(/Â/g, '');
-  // Se houver padrões Ã, realizar correção latin1->utf8
-  if (/Ã/.test(s)) {
-    try {
-      const buf = iconv.encode(s, 'latin1');
-      s = iconv.decode(buf, 'utf8');
-    } catch {}
-  }
-  // Correções pontuais muito comuns em PT-BR
-  const map: Record<string, string> = {
-    'Ã¡': 'á', 'Ã¢': 'â', 'Ã£': 'ã', 'Ã¤': 'ä',
-    'Ã©': 'é', 'Ãª': 'ê', 'Ã¨': 'è', 'Ã«': 'ë',
-    'Ã­': 'í', 'Ã¬': 'ì', 'Ã®': 'î', 'Ã¯': 'ï',
-    'Ã³': 'ó', 'Ã´': 'ô', 'Ã¶': 'ö', 'Ãµ': 'õ',
-    'Ãº': 'ú', 'Ã¼': 'ü', 'Ã±': 'ñ', 'Ã§': 'ç',
-    'Ã': 'À', 'Ã': 'Á', 'Ã': 'Â', 'Ã': 'Ã', 'Ã': 'Ç',
-    'Ã‰': 'É', 'ÃŠ': 'Ê', 'Ã‹': 'Ë', 'Ã': 'Í', 'ÃŽ': 'Î', 'Ã': 'Ï',
-    'Ã“': 'Ó', 'Ã”': 'Ô', 'Ã•': 'Õ', 'Ã–': 'Ö',
-    'Ãš': 'Ú', 'Ãœ': 'Ü', 'Ã‘': 'Ñ'
-  };
-  for (const [k, v] of Object.entries(map)) {
-    s = s.replace(new RegExp(k, 'g'), v);
-  }
-  // Correções específicas vistas no dataset (heurísticas)
-  s = s.replace(/Guimarï¿½es/g, 'Guimarães');
-  s = s.replace(/Jatobï¿½/g, 'Jatobá');
-  // Heurísticas para casos com '?' (lista fornecida)
-  s = s.replace(/Aur\?lio/gi, 'Aurélio');
-  s = s.replace(/Fl\?via/gi, 'Flávia');
-  s = s.replace(/Louren\?o/gi, 'Lourenço');
-  s = s.replace(/\bJos\?/gi, 'José');
-  s = s.replace(/\bZ\?/gi, 'Zé');
-  s = s.replace(/J\?nior/gi, 'Júnior');
-  s = s.replace(/H\?lio/gi, 'Hélio');
-  s = s.replace(/L\?cia/gi, 'Lúcia');
-  s = s.replace(/Sa\?de/gi, 'Saúde');
-  s = s.replace(/Andr\?/gi, 'André');
-  s = s.replace(/Boc\?o/gi, 'Bocão');
-  s = s.replace(/\bJ\?/gi, 'Jô');
-  s = s.replace(/Virg\?nia/gi, 'Virgínia');
-  s = s.replace(/O\?tica/gi, 'Ótica');
-  s = s.replace(/\b\?tica\b/gi, 'Ótica');
-  s = s.replace(/Vev\?/gi, 'Vevé');
-  s = s.replace(/Jo\?o/gi, 'João');
-  s = s.replace(/D\?a/gi, 'Déa');
-  s = s.replace(/\?gua/gi, 'Água');
-  s = s.replace(/Justi\?a/gi, 'Justiça');
-  s = s.replace(/S\?vio/gi, 'Sávio');
-  s = s.replace(/Mendon\?a/gi, 'Mendonça');
-  s = s.replace(/Cl\?udio/gi, 'Cláudio');
-  s = s.replace(/Uch\?a/gi, 'Uchôa');
-  s = s.replace(/C\?u/gi, 'Céu');
-  s = s.replace(/Uni\?o/gi, 'União');
-  s = s.replace(/T\?rcio/gi, 'Tércio');
-  s = s.replace(/X\?nia/gi, 'Xênia');
-  s = s.replace(/Lu\?s/gi, 'Luís');
-  // Correções para Irmão/Irmã
-  s = s.replace(/Irm\?o/gi, 'Irmão');
-  s = s.replace(/Irm\?a/gi, 'Irmã');
-  s = s.replace(/Alian\?a/gi, 'Aliança');
-  // Correções adicionais recorrentes no dataset
-  s = s.replace(/Fran\?a/gi, 'França');
-  s = s.replace(/Flor\?ncio/gi, 'Florêncio');
-  s = s.replace(/Mission\?rio/gi, 'Missionário');
-  s = s.replace(/Cear\?/gi, 'Ceará');
-  s = s.replace(/Palha\?o/gi, 'Palhaço');
-  // Estados/rotulagens
-  s = s.replace(/\bN\?O\b/gi, 'NÃO');
-  // Lista adicional enviada pelo usuário
-  s = s.replace(/Pac\?fico/gi, 'Pacífico');
-  s = s.replace(/Di\?cono/gi, 'Diácono');
-  s = s.replace(/Met\?dio/gi, 'Metódio');
-  s = s.replace(/Farm\?cia/gi, 'Farmácia');
-  s = s.replace(/Jord\?o/gi, 'Jordão');
-  s = s.replace(/For\?a/gi, 'Força');
-  s = s.replace(/Fub\?/gi, 'Fubá');
-  s = s.replace(/Futev\?lei/gi, 'Futevôlei');
-  s = s.replace(/F\?bio/gi, 'Fábio');
-  s = s.replace(/Mission\?ria/gi, 'Missionária');
-  s = s.replace(/Ata\?de/gi, 'Ataíde');
-  s = s.replace(/Castram\?vel/gi, 'Castramóvel');
-  s = s.replace(/Galv\?o/gi, 'Galvão');
-  s = s.replace(/C\?ndida/gi, 'Cândida');
-  s = s.replace(/Cabe\?a/gi, 'Cabeça');
-  s = s.replace(/Ti\?ta/gi, 'Tiêta');
-  s = s.replace(/St\?nio/gi, 'Stênio');
-  s = s.replace(/Ecl\?sio/gi, 'Eclésio');
-  s = s.replace(/Josu\?/gi, 'Josué');
-  s = s.replace(/Patr\?cia/gi, 'Patrícia');
-  s = s.replace(/Pel\?/gi, 'Pelé');
-  return s;
 }

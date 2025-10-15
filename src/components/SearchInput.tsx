@@ -55,27 +55,33 @@ export default function SearchInput({ optionsAll }: { optionsAll: Option[] }) {
   };
 
   return (
-    <div className="relative max-w-xl mx-auto">
-      <form onSubmit={onSubmit} className="flex gap-2">
-        <input
-          value={query}
-          onChange={(e) => {
-            setQuery(e.target.value);
-            setOpen(true);
-          }}
-          onFocus={() => setOpen(options.length > 0)}
-          onBlur={() => setTimeout(() => setOpen(false), 100)}
-          placeholder="Busque por Nome de Urna ou Número"
-          className="w-full rounded-md border border-gray-300 p-2 focus:outline-none focus:ring focus:border-blue-500"
-        />
-      </form>
+    <div className="relative max-w-2xl mx-auto text-left mt-[20vh]" suppressHydrationWarning>
+      <div className="bg-[#00a0c1] px-28 py-18 pt-16 rounded-lg shadow-lg">
+        <label className="block text-left mb-6 text-sm text-white font-medium">
+          Selecione um candidato
+        </label>
+        <form onSubmit={onSubmit} className="flex gap-2">
+          <input
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setOpen(true);
+            }}
+            onFocus={() => setOpen(options.length > 0)}
+            onBlur={() => setTimeout(() => setOpen(false), 100)}
+            placeholder="Digite um nome ou número"
+            aria-label="Digite um nome ou número do candidato"
+            className="w-full rounded-md border border-gray-300 p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white shadow-sm"
+          />
+        </form>
+      </div>
       {/* Busca local otimizada sem chamadas de rede */}
       {open && (
-        <ul className="absolute z-10 mt-2 w-full bg-white border border-gray-200 rounded-md shadow max-h-64 overflow-auto">
+        <ul className="absolute z-10 mt-2 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-64 overflow-auto text-left">
           {deferredOptions.map((opt) => (
             <li
               key={opt.value}
-              className="px-3 py-2 hover:bg-gray-100 cursor-pointer"
+              className="px-3 py-2 hover:bg-gray-100 cursor-pointer text-left"
               onMouseDown={(e) => e.preventDefault()}
               onMouseEnter={() => {
                 try {
@@ -87,6 +93,9 @@ export default function SearchInput({ optionsAll }: { optionsAll: Option[] }) {
               {opt.label}
             </li>
           ))}
+          {deferredOptions.length === 0 && (
+            <li className="px-3 py-2 text-sm text-gray-500">Nenhum resultado</li>
+          )}
         </ul>
       )}
     </div>

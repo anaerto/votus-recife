@@ -20,16 +20,6 @@ export default function CandidatoResultsClient({ candidateNumber, dataVersion, i
   const [loading, setLoading] = useState<boolean>(false);
   const cacheKey = useMemo(() => `candidato_analise_${candidateNumber}`, [candidateNumber]);
   const TTL_7_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
-  const workerRef = useMemo(() => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-      // @ts-ignore
-      const w = new Worker(new URL('../workers/analysis.worker.ts', import.meta.url), { type: 'module' });
-      return w as Worker;
-    } catch {
-      return null;
-    }
-  }, []);
 
   useEffect(() => {
     // Prefetch da home para fallback rápido caso não haja histórico
@@ -46,61 +36,29 @@ export default function CandidatoResultsClient({ candidateNumber, dataVersion, i
         setLoading(false);
         return;
       }
-      // If we have initialData (server-generated), render it immediately and persist,
-      // but still proceed to trigger Worker to compute on client for consistency.
+      // If we have initialData (DB/server-generated), use it and persist in cache; otherwise fetch API
       if (initialData) {
         setData(initialData);
         saveResult(cacheKey, initialData, dataVersion).catch(() => {});
+        return;
       }
-      // Trigger Worker: fetch raw CSVs and transfer buffers
-      if (!workerRef) return;
       setLoading(true);
       try {
-        const [candRes, votosRes] = await Promise.all([
-          fetch('/api/data/candidatos'),
-          fetch('/api/data/votos'),
-        ]);
-        if (!candRes.ok || !votosRes.ok) throw new Error('Falha ao carregar CSVs');
-        const [candBuf, votosBuf] = await Promise.all([
-          candRes.arrayBuffer(),
-          votosRes.arrayBuffer(),
-        ]);
-        const onMessage = (ev: MessageEvent) => {
-          const msg = ev.data as any;
-          if (!msg) return;
-          if (msg.type === 'result' && mounted) {
-            const payload = msg.payload as CandidateData;
-            setData(payload);
-            saveResult(cacheKey, payload, dataVersion).catch(() => {});
-            setLoading(false);
-          } else if (msg.type === 'error') {
-            setLoading(false);
-          }
-        };
-        const onError = () => {
-          setLoading(false);
-        };
-        workerRef.addEventListener('message', onMessage);
-        workerRef.addEventListener('error', onError);
-        workerRef.postMessage(
-          {
-            type: 'process',
-            candidateNumber,
-            candidatosBuffer: candBuf,
-            votosBuffer: votosBuf,
-            version: dataVersion,
-          },
-          [candBuf, votosBuf]
-        );
+        const res = await fetch(`/api/candidato?q=${encodeURIComponent(candidateNumber)}`);
+        if (!res.ok) throw new Error('Falha ao obter dados do candidato');
+        const payload = (await res.json()) as CandidateData;
+        if (mounted) {
+          setData(payload);
+          saveResult(cacheKey, payload, dataVersion).catch(() => {});
+        }
       } catch {
-        setLoading(false);
+        // no-op
+      } finally {
+        if (mounted) setLoading(false);
       }
     })();
     return () => {
       mounted = false;
-      try {
-        workerRef?.terminate();
-      } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cacheKey, dataVersion]);

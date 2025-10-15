@@ -1,11 +1,16 @@
 import CandidatoResultsClient from '@/components/CandidatoResultsClient';
 import { getCandidateData, getDataVersion } from '@/lib/data';
 
-type Props = { params: { nr: string } };
+type Props = { params: Promise<{ nr: string }> };
 
-export default function CandidatoPage({ params }: Props) {
-  const { nr } = params;
-  const data = getCandidateData(nr);
+export default async function CandidatoPage({ params }: Props) {
+  const { nr } = await params;
+  let data = null;
+  try {
+    data = await getCandidateData(nr);
+  } catch {
+    data = null;
+  }
   const version = getDataVersion();
   if (!data) {
     return (

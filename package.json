@@ -3,12 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
+    "dev": "next dev",
+    "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:load": "node ../scripts/load-csv-to-db.mjs"
   },
   "dependencies": {
+    "@vercel/postgres": "^0.8.0",
     "iconv-lite": "^0.7.0",
     "next": "15.5.4",
     "papaparse": "^5.5.3",
@@ -20,6 +22,7 @@
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/papaparse": "^5.3.16",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
