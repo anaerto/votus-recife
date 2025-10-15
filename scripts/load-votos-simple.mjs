@@ -10,7 +10,11 @@ function fixText(s) {
 }
 
 function norm(s) {
-  return fixText(s).toUpperCase().replace(/\s+/g, ' ').trim();
+  return String(fixText(s))
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
