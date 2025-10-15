@@ -22,8 +22,8 @@ export async function getSearchOptions(): Promise<Array<{ label: string; value: 
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .trim()
-      .toLowerCase()
-      .split(/[^a-z0-9]+/g)
+      .toUpperCase()
+      .split(/[^A-Z0-9]+/g)
       .filter(Boolean);
 
   // 1) Tenta via banco
@@ -35,7 +35,7 @@ export async function getSearchOptions(): Promise<Array<{ label: string; value: 
         const tokens = new Set<string>();
         for (const t of toNormTokens(c.nm_urna)) tokens.add(t);
         for (const t of toNormTokens(c.nm_votavel)) tokens.add(t);
-        tokens.add(String(c.nr_votavel).toLowerCase());
+        tokens.add(String(c.nr_votavel).toUpperCase());
         return { label, value: String(c.nr_votavel), searchTokens: Array.from(tokens) };
       });
     }
@@ -60,7 +60,7 @@ export async function getSearchOptions(): Promise<Array<{ label: string; value: 
         const tokens = new Set<string>();
         for (const t of toNormTokens(nmUrna)) tokens.add(t);
         for (const t of toNormTokens(nmVotavel)) tokens.add(t);
-        tokens.add(nr.toLowerCase());
+        tokens.add(nr.toUpperCase());
         return { label, value: nr, searchTokens: Array.from(tokens) };
       });
   } catch {
@@ -86,8 +86,8 @@ export async function resolveCandidate(query: string): Promise<Candidato | null>
       };
     }
   }
-  const q = String(query);
-  const { rows } = await sql`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE UPPER(nm_votavel) = ${q.toUpperCase()} OR UPPER(nm_urna) = ${q.toUpperCase()} LIMIT 1`;
+  const q = norm(String(query));
+  const { rows } = await sql`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nm_normalizado = ${q} LIMIT 1`;
   if (!rows.length) return null;
   const r = rows[0] as any;
   return {
