@@ -148,7 +148,10 @@ function fixText(input: string): string {
   s = s.replace(/Josu\?/gi, 'Josué');
   s = s.replace(/Patr\?cia/gi, 'Patrícia');
   s = s.replace(/Pel\?/gi, 'Pelé');
-
+  
+  // Correções específicas para casos problemáticos identificados
+  s = s.replace(/Sim\?es/gi, 'Simões');
+  s = s.replace(/Jatob\?/gi, 'Jatobá');
   
   return s;
 }
