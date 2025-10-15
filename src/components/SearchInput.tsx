@@ -56,7 +56,7 @@ export default function SearchInput({ optionsAll }: { optionsAll: Option[] }) {
 
   return (
     <div className="relative max-w-2xl mx-auto text-left mt-[20vh]" suppressHydrationWarning>
-      <div className="bg-[#00a0c1] px-28 py-18 pt-16 rounded-lg shadow-lg">
+      <div className="bg-[#00a0c1] px-4 sm:px-8 md:px-16 lg:px-28 py-6 sm:py-8 md:py-12 lg:py-18 pt-8 sm:pt-12 md:pt-16 rounded-lg shadow-lg">
         <label className="block text-left mb-6 text-sm text-white font-medium">
           Selecione um candidato
         </label>
