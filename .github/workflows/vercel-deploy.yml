@@ -1,0 +1,67 @@
+name: Vercel Deploy
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [production, preview]
+        required: true
+        default: production
+      skip_db:
+        description: Skip DB initialization
+        type: boolean
+        required: false
+        default: true
+      skip_smoke:
+        description: Skip smoke checks
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: vercel-deploy-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: Prepare Vercel project link
+        run: |
+          mkdir -p votus-recife/.vercel
+          cat > votus-recife/.vercel/project.json << 'EOF'
+          { "orgId": "${{ env.VERCEL_ORG_ID }}", "projectId": "${{ env.VERCEL_PROJECT_ID }}" }
+          EOF
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install app dependencies
+        working-directory: votus-recife
+        run: npm ci
+
+      - name: Run CLI workflow
+        run: |
+          ENVIRONMENT="${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'production' }}"
+          SKIP_DB="${{ github.event_name == 'workflow_dispatch' && inputs.skip_db || 'true' }}"
+          SKIP_SMOKE="${{ github.event_name == 'workflow_dispatch' && inputs.skip_smoke || 'false' }}"
+          node scripts/cli-workflow.mjs --env="$ENVIRONMENT" $([ "$SKIP_DB" = "true" ] && echo "--skip-db") $([ "$SKIP_SMOKE" = "true" ] && echo "--skip-smoke")
