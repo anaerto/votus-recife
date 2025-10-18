@@ -17,7 +17,7 @@ export default function SearchInput({ optionsAll }: { optionsAll: Option[] }) {
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .trim()
-      .toUpperCase();
+      .toLowerCase();
 
   useEffect(() => {
     if (!query || query.trim().length < 1) {

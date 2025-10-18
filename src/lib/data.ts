@@ -9,7 +9,7 @@ function norm(str: string): string {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim()
-    .toUpperCase();
+    .toLowerCase();
 }
 
 export function getDataVersion(): string {
@@ -22,20 +22,20 @@ export async function getSearchOptions(): Promise<Array<{ label: string; value: 
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .trim()
-      .toUpperCase()
-      .split(/[^A-Z0-9]+/g)
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
       .filter(Boolean);
 
   // 1) Tenta via banco
   try {
-    const { rows } = await sql`SELECT nr_votavel, nm_urna, nm_votavel FROM candidatos`;
+    const { rows } = await sql.query('SELECT nr_votavel, nm_urna, nm_votavel, sg_partido, resultado FROM candidatos', []);
     if (rows && rows.length > 0) {
       return rows.map((c: any) => {
         const label = `${c.nm_urna} (${c.nr_votavel})`;
         const tokens = new Set<string>();
         for (const t of toNormTokens(c.nm_urna)) tokens.add(t);
         for (const t of toNormTokens(c.nm_votavel)) tokens.add(t);
-        tokens.add(String(c.nr_votavel).toUpperCase());
+        tokens.add(String(c.nr_votavel).toLowerCase());
         return { label, value: String(c.nr_votavel), searchTokens: Array.from(tokens) };
       });
     }
@@ -71,9 +71,12 @@ export async function getSearchOptions(): Promise<Array<{ label: string; value: 
 }
 
 export async function resolveCandidate(query: string): Promise<Candidato | null> {
+  const qNorm = norm(String(query));
+  
+  // Busca por número
   const isNum = /^\d+$/.test(String(query));
   if (isNum) {
-    const { rows } = await sql`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nr_votavel = ${String(query)} LIMIT 1`;
+    const { rows } = await sql.query('SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nr_votavel = ? LIMIT 1', [String(query)]);
     if (rows.length) {
       const r = rows[0] as any;
       return {
@@ -86,18 +89,36 @@ export async function resolveCandidate(query: string): Promise<Candidato | null>
       };
     }
   }
-  const q = norm(String(query));
-  const { rows } = await sql`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nm_normalizado = ${q} LIMIT 1`;
-  if (!rows.length) return null;
-  const r = rows[0] as any;
-  return {
-    nrVotavel: String(r.nr_votavel),
-    nmVotavel: String(r.nm_votavel),
-    nmUrna: String(r.nm_urna),
-    partido: String(r.sg_partido),
-    resultado: String(r.resultado),
-    totalVotos: Number(r.total_votos) || 0,
-  };
+  
+  // Busca parcial por nome de urna
+  let { rows } = await sql.query('SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nm_urna LIKE ? ORDER BY total_votos DESC LIMIT 1', ['%' + qNorm + '%']);
+  if (rows.length) {
+    const r = rows[0] as any;
+    return {
+      nrVotavel: String(r.nr_votavel),
+      nmVotavel: String(r.nm_votavel),
+      nmUrna: String(r.nm_urna),
+      partido: String(r.sg_partido),
+      resultado: String(r.resultado),
+      totalVotos: Number(r.total_votos) || 0,
+    };
+  }
+  
+  // Busca parcial por nome completo
+  ({ rows } = await sql.query('SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nm_votavel LIKE ? ORDER BY total_votos DESC LIMIT 1', ['%' + qNorm + '%']));
+  if (rows.length) {
+    const r = rows[0] as any;
+    return {
+      nrVotavel: String(r.nr_votavel),
+      nmVotavel: String(r.nm_votavel),
+      nmUrna: String(r.nm_urna),
+      partido: String(r.sg_partido),
+      resultado: String(r.resultado),
+      totalVotos: Number(r.total_votos) || 0,
+    };
+  }
+  
+  return null;
 }
 
 // Resolve com fallback ao CSV quando o banco não retornar
@@ -146,9 +167,9 @@ export async function getCandidateData(nrOrName: string): Promise<CandidateData 
   let rankingGeralTotal = 0;
   let rankingGeralPosicao = 0;
   try {
-    const rankRow = await sql`SELECT COUNT(*) AS total, SUM(CASE WHEN total_votos > ${total} THEN 1 ELSE 0 END) + 1 AS pos FROM candidatos`;
-    rankingGeralTotal = Number((rankRow.rows[0] as any).total) || 0;
-    rankingGeralPosicao = Number((rankRow.rows[0] as any).pos) || 0;
+    const rankRow = await sql.query('SELECT COUNT(*) AS total, SUM(CASE WHEN total_votos > ? THEN 1 ELSE 0 END) + 1 AS pos FROM candidatos', [total]);
+    rankingGeralPosicao = Number(rankRow.rows[0]?.pos) || 1;
+    rankingGeralTotal = Number(rankRow.rows[0]?.total) || 1;
   } catch {
     // Fallback CSV: ranking por NM_VOTAVEL
     try {
@@ -180,10 +201,10 @@ export async function getCandidateData(nrOrName: string): Promise<CandidateData 
   const porLocal = new Map<string, number>();
   const porSecao = new Map<string, number>();
   try {
-    const zonaRows = await sql`SELECT zona AS zona, SUM(votos)::int AS votos FROM votos WHERE nm_normalizado IN (${norm(nameVote)}, ${norm(nameUrn)}) GROUP BY zona ORDER BY zona`;
-    const bairroRows = await sql`SELECT bairro AS bairro, SUM(votos)::int AS votos FROM votos WHERE nm_normalizado IN (${norm(nameVote)}, ${norm(nameUrn)}) GROUP BY bairro ORDER BY votos DESC`;
-    const localRows = await sql`SELECT local AS local, SUM(votos)::int AS votos FROM votos WHERE nm_normalizado IN (${norm(nameVote)}, ${norm(nameUrn)}) GROUP BY local ORDER BY votos DESC`;
-    const secaoRows = await sql`SELECT secao AS secao, SUM(votos)::int AS votos FROM votos WHERE nm_normalizado IN (${norm(nameVote)}, ${norm(nameUrn)}) GROUP BY secao ORDER BY votos DESC`;
+    const zonaRows = await sql.query('SELECT nr_zona as zona, SUM(qt_votos) AS votos FROM votos WHERE nr_votavel = ? GROUP BY nr_zona ORDER BY nr_zona', [cand.nrVotavel]);
+    const bairroRows = await sql.query('SELECT nm_bairro as bairro, SUM(qt_votos) AS votos FROM votos WHERE nr_votavel = ? GROUP BY nm_bairro ORDER BY votos DESC', [cand.nrVotavel]);
+    const localRows = await sql.query('SELECT nm_local_votacao as local, SUM(qt_votos) AS votos FROM votos WHERE nr_votavel = ? GROUP BY nm_local_votacao ORDER BY votos DESC', [cand.nrVotavel]);
+    const secaoRows = await sql.query('SELECT nr_secao as secao, SUM(qt_votos) AS votos FROM votos WHERE nr_votavel = ? GROUP BY nr_secao ORDER BY votos DESC', [cand.nrVotavel]);
     for (const r of (zonaRows.rows || []) as any[]) porZona.set(String(r.zona), Number(r.votos) || 0);
     for (const r of (bairroRows.rows || []) as any[]) porBairro.set(String(r.bairro), Number(r.votos) || 0);
     for (const r of (localRows.rows || []) as any[]) porLocal.set(String(r.local), Number(r.votos) || 0);
@@ -247,20 +268,18 @@ export async function getCandidateData(nrOrName: string): Promise<CandidateData 
     try {
       let scopeQuery: any;
       if (escopo === 'zona') {
-        scopeQuery = await sql`SELECT nm_normalizado AS nm, SUM(votos)::int AS v FROM votos WHERE zona = ${nome} GROUP BY nm_normalizado`;
+        scopeQuery = await sql.query('SELECT nr_votavel AS nm, SUM(qt_votos) AS v FROM votos WHERE nr_zona = ? GROUP BY nr_votavel', [nome]);
       } else if (escopo === 'secao') {
-        scopeQuery = await sql`SELECT nm_normalizado AS nm, SUM(votos)::int AS v FROM votos WHERE secao = ${nome} GROUP BY nm_normalizado`;
+        scopeQuery = await sql.query('SELECT nr_votavel AS nm, SUM(qt_votos) AS v FROM votos WHERE nr_secao = ? GROUP BY nr_votavel', [nome]);
       } else if (escopo === 'bairro') {
-        scopeQuery = await sql`SELECT nm_normalizado AS nm, SUM(votos)::int AS v FROM votos WHERE bairro = ${nome} GROUP BY nm_normalizado`;
-      } else {
-        scopeQuery = await sql`SELECT nm_normalizado AS nm, SUM(votos)::int AS v FROM votos WHERE local = ${nome} GROUP BY nm_normalizado`;
+        scopeQuery = await sql.query('SELECT nr_votavel AS nm, SUM(qt_votos) AS v FROM votos WHERE nm_bairro = ? GROUP BY nr_votavel', [nome]);
+      } else if (escopo === 'local') {
+        scopeQuery = await sql.query('SELECT nr_votavel AS nm, SUM(qt_votos) AS v FROM votos WHERE nm_local_votacao = ? GROUP BY nr_votavel', [nome]);
       }
       const ranking = (scopeQuery.rows as any[]).sort((a, b) => Number(b.v) - Number(a.v));
-      const targetNorm1 = norm(nameVote);
-      const targetNorm2 = norm(nameUrn);
       const posicao = Math.max(
         1,
-        ranking.findIndex((r) => String(r.nm) === targetNorm1 || String(r.nm) === targetNorm2) + 1
+        ranking.findIndex((r) => String(r.nm) === cand.nrVotavel) + 1
       );
       const total = ranking.length;
       return { nome, votos, posicao, total };
