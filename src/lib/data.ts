@@ -70,8 +70,33 @@ export async function getSearchOptions(): Promise<Array<{ label: string; value: 
   return [];
 }
 
+// Função auxiliar para criar normalização SQL (remove acentos)
+function createSqlNormalization(column: string): string {
+  return `LOWER(
+    REPLACE(
+      REPLACE(
+        REPLACE(
+          REPLACE(
+            REPLACE(
+              REPLACE(
+                REPLACE(
+                  REPLACE(
+                    REPLACE(
+                      REPLACE(${column}, 'á', 'a'),
+                      'à', 'a'),
+                    'ã', 'a'),
+                  'â', 'a'),
+                'é', 'e'),
+              'ê', 'e'),
+            'í', 'i'),
+          'ó', 'o'),
+        'ô', 'o'),
+      'ú', 'u')
+  )`;
+}
+
 export async function resolveCandidate(query: string): Promise<Candidato | null> {
-  const qNorm = norm(String(query));
+  const qNorm = norm(String(query)).trim();
   
   // Busca por número
   const isNum = /^\d+$/.test(String(query));
@@ -90,8 +115,12 @@ export async function resolveCandidate(query: string): Promise<Candidato | null>
     }
   }
   
-  // Busca parcial por nome de urna
-  let { rows } = await sql.query('SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nm_urna LIKE ? ORDER BY total_votos DESC LIMIT 1', ['%' + qNorm + '%']);
+  // Criar expressões SQL normalizadas
+  const normalizedUrna = createSqlNormalization('nm_urna');
+  const normalizedVotavel = createSqlNormalization('nm_votavel');
+  
+  // Estratégia 1: Busca exata normalizada por nome de urna
+  let { rows } = await sql.query(`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE ${normalizedUrna} = ? ORDER BY total_votos DESC LIMIT 1`, [qNorm]);
   if (rows.length) {
     const r = rows[0] as any;
     return {
@@ -104,8 +133,8 @@ export async function resolveCandidate(query: string): Promise<Candidato | null>
     };
   }
   
-  // Busca parcial por nome completo
-  ({ rows } = await sql.query('SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE nm_votavel LIKE ? ORDER BY total_votos DESC LIMIT 1', ['%' + qNorm + '%']));
+  // Estratégia 2: Busca exata normalizada por nome completo
+  ({ rows } = await sql.query(`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE ${normalizedVotavel} = ? ORDER BY total_votos DESC LIMIT 1`, [qNorm]));
   if (rows.length) {
     const r = rows[0] as any;
     return {
@@ -116,6 +145,78 @@ export async function resolveCandidate(query: string): Promise<Candidato | null>
       resultado: String(r.resultado),
       totalVotos: Number(r.total_votos) || 0,
     };
+  }
+  
+  // Estratégia 3: Busca parcial normalizada por nome de urna
+  ({ rows } = await sql.query(`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE ${normalizedUrna} LIKE ? ORDER BY total_votos DESC LIMIT 1`, ['%' + qNorm + '%']));
+  if (rows.length) {
+    const r = rows[0] as any;
+    return {
+      nrVotavel: String(r.nr_votavel),
+      nmVotavel: String(r.nm_votavel),
+      nmUrna: String(r.nm_urna),
+      partido: String(r.sg_partido),
+      resultado: String(r.resultado),
+      totalVotos: Number(r.total_votos) || 0,
+    };
+  }
+  
+  // Estratégia 4: Busca parcial normalizada por nome completo
+  ({ rows } = await sql.query(`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE ${normalizedVotavel} LIKE ? ORDER BY total_votos DESC LIMIT 1`, ['%' + qNorm + '%']));
+  if (rows.length) {
+    const r = rows[0] as any;
+    return {
+      nrVotavel: String(r.nr_votavel),
+      nmVotavel: String(r.nm_votavel),
+      nmUrna: String(r.nm_urna),
+      partido: String(r.sg_partido),
+      resultado: String(r.resultado),
+      totalVotos: Number(r.total_votos) || 0,
+    };
+  }
+  
+  // Estratégia 5: Busca por palavras individuais (para nomes compostos) com normalização
+  const words = qNorm.split(/\s+/).filter(word => word.length > 1);
+  if (words.length > 1) {
+    // Para nomes compostos, buscar candidatos que contenham todas as palavras
+    let whereConditions = [];
+    let params = [];
+    
+    for (const word of words) {
+      whereConditions.push(`(${normalizedUrna} LIKE ? OR ${normalizedVotavel} LIKE ?)`);
+      params.push('%' + word + '%', '%' + word + '%');
+    }
+    
+    const whereClause = whereConditions.join(' AND ');
+    ({ rows } = await sql.query(`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE ${whereClause} ORDER BY total_votos DESC LIMIT 1`, params));
+    
+    if (rows.length) {
+      const r = rows[0] as any;
+      return {
+        nrVotavel: String(r.nr_votavel),
+        nmVotavel: String(r.nm_votavel),
+        nmUrna: String(r.nm_urna),
+        partido: String(r.sg_partido),
+        resultado: String(r.resultado),
+        totalVotos: Number(r.total_votos) || 0,
+      };
+    }
+    
+    // Se não encontrou com AND, tentar com OR (pelo menos uma palavra)
+    const whereClauseOr = whereConditions.join(' OR ');
+    ({ rows } = await sql.query(`SELECT nr_votavel, nm_votavel, nm_urna, sg_partido, resultado, total_votos FROM candidatos WHERE ${whereClauseOr} ORDER BY total_votos DESC LIMIT 1`, params));
+    
+    if (rows.length) {
+      const r = rows[0] as any;
+      return {
+        nrVotavel: String(r.nr_votavel),
+        nmVotavel: String(r.nm_votavel),
+        nmUrna: String(r.nm_urna),
+        partido: String(r.sg_partido),
+        resultado: String(r.resultado),
+        totalVotos: Number(r.total_votos) || 0,
+      };
+    }
   }
   
   return null;
