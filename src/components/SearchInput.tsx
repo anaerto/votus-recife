@@ -26,8 +26,27 @@ export default function SearchInput({ optionsAll }: { optionsAll: Option[] }) {
     }
     const t = setTimeout(() => {
       const qnorm = norm(query);
+      const queryWords = qnorm.split(/\s+/).filter(w => w.length > 0);
+      
       const results = optionsAll
-        .filter((o) => o.searchTokens.some((t) => t.startsWith(qnorm)) || o.value.startsWith(query))
+        .filter((o) => {
+          // Busca por número do candidato
+          if (o.value.startsWith(query)) return true;
+          
+          // Busca por token único que começa com a query
+          if (o.searchTokens.some((t) => t.startsWith(qnorm))) return true;
+          
+          // Busca por múltiplas palavras (concatenação progressiva)
+          if (queryWords.length > 1) {
+            // Verifica se todas as palavras da query estão presentes nos tokens
+            const allWordsMatch = queryWords.every(word => 
+              o.searchTokens.some(token => token.startsWith(word))
+            );
+            if (allWordsMatch) return true;
+          }
+          
+          return false;
+        })
         .slice(0, 10);
       setOptions(results);
       setOpen(results.length > 0);
